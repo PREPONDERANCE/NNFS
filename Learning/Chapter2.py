@@ -20,6 +20,7 @@ output = list(
         zip(weights, bias),
     )
 )
+output = np.dot(inputs, weights) + bias
 output = np.dot(np.array(inputs), np.array(weights).T) + bias
 
 
