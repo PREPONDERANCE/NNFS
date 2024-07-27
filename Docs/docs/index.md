@@ -1,17 +1,12 @@
-# Welcome to MkDocs
+# Getting Started
 
-For full documentation visit [mkdocs.org](https://www.mkdocs.org).
+This site will record my learning progress through the book **[Neural Network from Scratch in Python](https://github.com/Dev-Gaju/NNFS-book-with-Implementation/blob/master/Neural%20Networks%20from%20Scratch%20in%20Python.pdf)**.
 
-## Commands
+## Content
 
-* `mkdocs new [dir-name]` - Create a new project.
-* `mkdocs serve` - Start the live-reloading docs server.
-* `mkdocs build` - Build the documentation site.
-* `mkdocs -h` - Print help message and exit.
+This documentation will unfold itself following the book content in which I shall explain some of the difficult part to understand or some extended knowledge.
 
-## Project layout
+## Versioning
 
-    mkdocs.yml    # The configuration file.
-    docs/
-        index.md  # The documentation homepage.
-        ...       # Other markdown pages, images and other files.
+- Python = 3.11.3
+- NumPy = 2.0.1
