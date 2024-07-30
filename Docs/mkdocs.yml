@@ -22,6 +22,9 @@ theme:
   name: material
   favicon: assets/mindmap.png
   features:
+    - search.share
+    - search.suggest
+    - navigation.footer
     - content.code.copy
     - content.code.annotate
   palette:
