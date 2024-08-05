@@ -18,6 +18,16 @@ markdown_extensions:
 extra_javascript:
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
+nav:
+  - Getting Started: index.md
+  - Content:
+    - content/chapter2.md
+    - content/chapter3.md
+    - content/chapter4.md
+    - content/chapter5.md
+    - content/chapter9.md
+    - content/chapter10.md
+
 theme:
   name: material
   favicon: assets/mindmap.png
@@ -28,7 +38,6 @@ theme:
     - content.code.copy
     - content.code.annotate
   palette:
-
     - media: "(prefers-color-scheme)"
       primary: indigo
       toggle:
