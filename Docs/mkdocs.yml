@@ -28,6 +28,7 @@ nav:
     - content/chapter9.md
     - content/chapter10.md
     - content/chapter14.md
+    - content/chapter15.md
 
 theme:
   name: material
