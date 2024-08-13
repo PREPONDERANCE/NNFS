@@ -292,7 +292,7 @@ class AccuracyCategorical(Accuracy):
         if target.ndim == 2:
             target = np.argmax(target, axis=1)
 
-        return np.mean(predict == target)
+        return predict == target
 
 
 class Optimizer(Layer):
