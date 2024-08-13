@@ -60,7 +60,7 @@ class LayerDense(Layer):
         if self.br1 > 0:
             d = np.ones_like(self.biases)
             d[self.biases < 0] = -1
-            self.dbiases += self.br1 * self.biases
+            self.dbiases += self.br1 * d
         if self.br2 > 0:
             self.dbiases += 2 * self.br2 * self.biases
 
@@ -377,10 +377,10 @@ class OptimizerRMSProp(Optimizer):
             layer.weight_cache = np.zeros_like(layer.weights)
             layer.biases_cache = np.zeros_like(layer.biases)
 
-        layer.weight_cache += (
+        layer.weight_cache = (
             self.rho * layer.weight_cache + (1 - self.rho) * layer.dweights**2
         )
-        layer.biases_cache += (
+        layer.biases_cache = (
             self.rho * layer.biases_cache + (1 - self.rho) * layer.dbiases**2
         )
 
