@@ -187,10 +187,10 @@ class OptimizerRMSProp(Optimizer):
             layer.weight_cache = np.zeros_like(layer.weights)
             layer.biases_cache = np.zeros_like(layer.biases)
 
-        layer.weight_cache += (
+        layer.weight_cache = (
             self.rho * layer.weight_cache + (1 - self.rho) * layer.dweights**2
         )
-        layer.biases_cache += (
+        layer.biases_cache = (
             self.rho * layer.biases_cache + (1 - self.rho) * layer.dbiases**2
         )
 
