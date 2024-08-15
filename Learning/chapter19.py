@@ -1,7 +1,8 @@
-import numpy as np
+import os
+import cv2
+import math
 import nnfs
-
-from nnfs.datasets import spiral_data
+import numpy as np
 
 nnfs.init()
 
@@ -131,6 +132,11 @@ class ActivationSigmoid(Layer):
 
 
 class Loss(Layer):
+    def __init__(self):
+        super().__init__()
+        self.accumulated_sum = 0
+        self.accumulated_count = 0
+
     def forward(self, predict: np.ndarray, target: np.ndarray):
         raise NotImplementedError
 
@@ -147,11 +153,28 @@ class Loss(Layer):
         *,
         include_regularization: bool = True,
     ):
-        return (
-            (np.mean(self.forward(predict, target)), self.regularize())
-            if include_regularization
-            else np.mean(self.forward(predict, target))
-        )
+        sample_losses = self.forward(predict, target)
+        data_loss = np.mean(sample_losses)
+
+        self.accumulated_sum += np.sum(sample_losses)
+        self.accumulated_count += len(sample_losses)
+
+        if not include_regularization:
+            return data_loss
+
+        return data_loss, self.regularize()
+
+    def calculate_accumulated(self, *, include_regularization: bool = True):
+        data_loss = self.accumulated_sum / self.accumulated_count
+
+        if not include_regularization:
+            return data_loss
+
+        return data_loss, self.regularize()
+
+    def new_pass(self):
+        self.accumulated_count = 0
+        self.accumulated_sum = 0
 
     def regularize(self):
         rl = 0
@@ -243,6 +266,11 @@ class ActivationCategoricalLoss:
 
 
 class Accuracy(Layer):
+    def __init__(self):
+        super().__init__()
+        self.accumulated_sum = 0
+        self.accumulated_count = 0
+
     def init(self, target: np.ndarray):
         pass
 
@@ -250,7 +278,19 @@ class Accuracy(Layer):
         pass
 
     def calculate(self, output: np.ndarray, target: np.ndarray):
-        return np.mean(self.compare(output, target))
+        comparisons = self.compare(output, target)
+
+        self.accumulated_sum += np.sum(comparisons)
+        self.accumulated_count += len(comparisons)
+
+        return np.mean(comparisons)
+
+    def calculate_accumulated(self):
+        return self.accumulated_sum / self.accumulated_count
+
+    def new_pass(self):
+        self.accumulated_count = 0
+        self.accumulated_sum = 0
 
 
 class AccuracyRegression(Accuracy):
@@ -477,60 +517,97 @@ class Model:
         for layer in self.layers[::-1]:
             layer.backward(layer.next.dinputs)
 
-    def _train(self, X: np.ndarray, y: np.ndarray):
-        output = self.forward(X)
-
-        self.data_loss, self.reg_loss = self.loss.calculate(output, y)
-        self.res_loss = self.data_loss + self.reg_loss
-
-        predictions = self.output_layer.predict(output)
-        self.res_acc = self.accuracy.calculate(predictions, y)
-
     def train(
         self,
         X: np.ndarray,
         y: np.ndarray,
         *,
+        batch_size: int | None = None,
         validation: tuple[np.ndarray, np.ndarray] = None,
         epochs: int = 100,
         print_every: int = 10,
     ):
         self.accuracy.init(y)
 
+        train_steps = 1 if not batch_size else math.ceil(len(X) / batch_size)
+        if validation is not None:
+            X_test, y_test = validation
+            validation_steps = (
+                1 if not batch_size else math.ceil(len(X_test) / batch_size)
+            )
+
         for epoch in range(1, 1 + epochs):
-            output = self.forward(X)
+            print(f"epoch: {epoch}")
 
-            data_loss, reg_loss = self.loss.calculate(output, y)
-            loss = data_loss + reg_loss
+            self.loss.new_pass()
+            self.accuracy.new_pass()
 
-            predictions = self.output_layer.predict(output)
-            acc = self.accuracy.calculate(predictions, y)
+            for step in range(train_steps):
+                if batch_size is None:
+                    batch_x = X
+                    batch_y = y
+                else:
+                    batch_x = X[step * batch_size : (step + 1) * batch_size]
+                    batch_y = y[step * batch_size : (step + 1) * batch_size]
 
-            self.backward(output, y)
+                output = self.forward(batch_x)
 
-            self.optimizer.pre_update_params()
-            self.optimizer.update()
-            self.optimizer.post_update_params()
+                data_loss, reg_loss = self.loss.calculate(output, batch_y)
+                loss = data_loss + reg_loss
 
-            if not epoch % print_every:
-                print(
-                    f"epoch: {epoch}, "
-                    + f"acc: {acc:.3f}, "
-                    + f"loss: {loss:.3f}, "
-                    + f"data_loss: {data_loss:.3f}, "
-                    + f"reg_loss: {reg_loss:.3f}, "
-                    + f"lr: {self.optimizer.curr_lr}"
-                )
+                predictions = self.output_layer.predict(output)
+                acc = self.accuracy.calculate(predictions, batch_y)
+
+                self.backward(output, batch_y)
+
+                self.optimizer.pre_update_params()
+                self.optimizer.update()
+                self.optimizer.post_update_params()
+
+                if not step % print_every or step == train_steps - 1:
+                    print(
+                        f"step: {step}, "
+                        + f"acc: {acc:.3f}, "
+                        + f"loss: {loss:.3f}, "
+                        + f"data_loss: {data_loss:.3f}, "
+                        + f"reg_loss: {reg_loss:.3f}, "
+                        + f"lr: {self.optimizer.curr_lr}"
+                    )
+
+            epoch_data_loss, epoch_reg_loss = self.loss.calculate_accumulated()
+            epoch_loss = epoch_data_loss + epoch_reg_loss
+            epoch_acc = self.accuracy.calculate_accumulated()
+
+            print(
+                "training, "
+                + f"acc: {epoch_acc:.3f}, "
+                + f"loss: {epoch_loss:.3f}, "
+                + f"data_loss: {epoch_data_loss:.3f}, "
+                + f"reg_loss: {epoch_reg_loss:.3f}, "
+                + f"lr: {self.optimizer.curr_lr}"
+            )
 
         if validation:
-            x_val, y_val = validation
+            self.loss.new_pass()
+            self.accuracy.new_pass()
 
-            output = self.forward(x_val, training=False)
-            loss = self.loss.calculate(output, y_val, include_regularization=False)
-            predictions = self.output_layer.predict(output)
-            accuracy = self.accuracy.calculate(predictions, y_val)
+            for step in range(validation_steps):
+                if batch_size is None:
+                    batch_x_test = X_test
+                    batch_y_test = y_test
+                else:
+                    batch_x_test = X_test[step * batch_size : (step + 1) * batch_size]
+                    batch_y_test = y_test[step * batch_size : (step + 1) * batch_size]
 
-            print(f"Validation, acc: {accuracy:.3f}, loss: {loss:.3f}")
+                output = self.forward(batch_x_test, training=False)
+                self.loss.calculate(output, batch_y_test, include_regularization=False)
+                predictions = self.output_layer.predict(output)
+                self.accuracy.calculate(predictions, batch_y_test)
+
+            loss = self.loss.calculate_accumulated(include_regularization=False)
+            acc = self.accuracy.calculate_accumulated()
+
+            print(f"Validation, acc: {acc:.3f}, loss: {loss:.3f}")
 
     def dump(self):
         if self.layers:
@@ -544,21 +621,61 @@ class Model:
             print("No layers added yet.")
 
 
-X, y = spiral_data(1000, 3)
-x_test, y_test = spiral_data(100, 3)
+def load_dataset(dataset: str, path: str):
+    labels = os.listdir(os.path.join(path, dataset))
+
+    X, y = [], []
+
+    for label in labels:
+        for file in os.listdir(os.path.join(path, dataset, label)):
+            image = cv2.imread(
+                os.path.join(path, dataset, label, file), cv2.IMREAD_UNCHANGED
+            )
+            X.append(image)
+            y.append(label)
+
+    return np.array(X), np.array(y).astype("uint8")
+
+
+def create_data(path: str):
+    X_train, y_train = load_dataset("train", path)
+    X_test, y_test = load_dataset("test", path)
+
+    return (X_train, y_train, X_test, y_test)
+
+
+X, y, X_test, y_test = create_data("fashion_mnist_images")
+
+# Shuffle the data
+keys = np.array(range(X.shape[0]))
+np.random.shuffle(keys)
+X, y = X[keys], y[keys]
+
+# Reshape and Scale the data
+X = (X.astype("float32") - 127.5) / 127.5
+X_test = (X_test.astype("float32") - 127.5) / 127.5
+
+X = X.reshape(X.shape[0], -1)
+X_test = X_test.reshape(X_test.shape[0], -1)
 
 model = Model()
 
-model.add(LayerDense(2, 64, weight_regularize_l2=5e-4, bias_regularize_l2=5e-4))
+model.add(LayerDense(X.shape[1], 64))
 model.add(ActivationReLU())
-model.add(LayerDropout(0.1))
-model.add(LayerDense(64, 3))
+model.add(LayerDense(64, 64))
+model.add(ActivationReLU())
+model.add(LayerDense(64, 10))
 model.add(ActivationSoftMax())
 
 model.set(
     loss=LossCategoricalCrossEntropy(),
-    optimizer=OptimizerAdam(0.05, 5e-5, 1e-7, 0.9, 0.99),
+    optimizer=OptimizerAdam(
+        learning_rate=0.005, decay=5e-5, epsilon=1e-7, beta1=0.9, beta2=0.999
+    ),
     accuracy=AccuracyCategorical(),
 )
+
 model.finalize()
-model.train(X, y, validation=(x_test, y_test), epochs=10001, print_every=100)
+model.train(
+    X, y, batch_size=128, validation=(X_test, y_test), epochs=5, print_every=100
+)

@@ -176,7 +176,7 @@ class LossMeanAbsoluteError(Loss):
 
     def backward(self, dvalues: np.ndarray, target: np.ndarray):
         batch, output = dvalues.shape
-        self.dinputs = np.signs(target - dvalues) / (batch * output)
+        self.dinputs = np.sign(target - dvalues) / (batch * output)
 
 
 class ActivationCategorical:
