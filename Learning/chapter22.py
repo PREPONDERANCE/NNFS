@@ -1,7 +1,10 @@
-import numpy as np
+import os
+import cv2
+import copy
+import math
 import nnfs
-
-from nnfs.datasets import spiral_data
+import pickle
+import numpy as np
 
 nnfs.init()
 
@@ -41,6 +44,12 @@ class LayerDense(Layer):
         self.wr2 = weight_regularize_l2
         self.br1 = bias_regularize_l1
         self.br2 = bias_regularize_l2
+
+    def get_parameters(self):
+        return self.weights, self.biases
+
+    def set_parameters(self, weights: np.ndarray, biases: np.ndarray):
+        self.weights, self.biases = weights, biases
 
     def forward(self, inputs: np.ndarray, training: bool):
         self.inputs = inputs
@@ -131,6 +140,11 @@ class ActivationSigmoid(Layer):
 
 
 class Loss(Layer):
+    def __init__(self):
+        super().__init__()
+        self.accumulated_sum = 0
+        self.accumulated_count = 0
+
     def forward(self, predict: np.ndarray, target: np.ndarray):
         raise NotImplementedError
 
@@ -147,11 +161,28 @@ class Loss(Layer):
         *,
         include_regularization: bool = True,
     ):
-        return (
-            (np.mean(self.forward(predict, target)), self.regularize())
-            if include_regularization
-            else np.mean(self.forward(predict, target))
-        )
+        sample_losses = self.forward(predict, target)
+        data_loss = np.mean(sample_losses)
+
+        self.accumulated_sum += np.sum(sample_losses)
+        self.accumulated_count += len(sample_losses)
+
+        if not include_regularization:
+            return data_loss
+
+        return data_loss, self.regularize()
+
+    def calculate_accumulated(self, *, include_regularization: bool = True):
+        data_loss = self.accumulated_sum / self.accumulated_count
+
+        if not include_regularization:
+            return data_loss
+
+        return data_loss, self.regularize()
+
+    def new_pass(self):
+        self.accumulated_count = 0
+        self.accumulated_sum = 0
 
     def regularize(self):
         rl = 0
@@ -243,6 +274,11 @@ class ActivationCategoricalLoss:
 
 
 class Accuracy(Layer):
+    def __init__(self):
+        super().__init__()
+        self.accumulated_sum = 0
+        self.accumulated_count = 0
+
     def init(self, target: np.ndarray):
         pass
 
@@ -250,7 +286,19 @@ class Accuracy(Layer):
         pass
 
     def calculate(self, output: np.ndarray, target: np.ndarray):
-        return np.mean(self.compare(output, target))
+        comparisons = self.compare(output, target)
+
+        self.accumulated_sum += np.sum(comparisons)
+        self.accumulated_count += len(comparisons)
+
+        return np.mean(comparisons)
+
+    def calculate_accumulated(self):
+        return self.accumulated_sum / self.accumulated_count
+
+    def new_pass(self):
+        self.accumulated_count = 0
+        self.accumulated_sum = 0
 
 
 class AccuracyRegression(Accuracy):
@@ -432,7 +480,13 @@ class Model:
             self.layers[-1].connect(layer)
         self.layers.append(layer)
 
-    def set(self, *, loss: Loss, optimizer: Optimizer, accuracy: Accuracy):
+    def set(
+        self,
+        *,
+        loss: Loss = None,
+        optimizer: Optimizer = None,
+        accuracy: Accuracy = None,
+    ):
         self.loss = loss
         self.optimizer = optimizer
         self.accuracy = accuracy
@@ -448,12 +502,21 @@ class Model:
 
             self.trainable = [_l for _l in self.layers if hasattr(_l, "weights")]
             self.loss.set_trainable(self.trainable)
-            self.optimizer.set_trainable(self.trainable)
+
+            if self.optimizer:
+                self.optimizer.set_trainable(self.trainable)
 
             if isinstance(self.output_layer, ActivationSoftMax) and isinstance(
                 self.loss, LossCategoricalCrossEntropy
             ):
                 self.softmax_loss = ActivationCategoricalLoss()
+
+    def get_parameters(self):
+        return [layer.get_parameters() for layer in self.trainable]
+
+    def set_parameters(self, parameters: list[tuple[np.ndarray, np.ndarray]]):
+        for parameter, layer in zip(parameters, self.trainable):
+            layer.set_parameters(*parameter)
 
     def forward(self, data: np.ndarray, *, training: bool = True):
         self.input_layer.forward(data)
@@ -477,60 +540,112 @@ class Model:
         for layer in self.layers[::-1]:
             layer.backward(layer.next.dinputs)
 
-    def _train(self, X: np.ndarray, y: np.ndarray):
-        output = self.forward(X)
-
-        self.data_loss, self.reg_loss = self.loss.calculate(output, y)
-        self.res_loss = self.data_loss + self.reg_loss
-
-        predictions = self.output_layer.predict(output)
-        self.res_acc = self.accuracy.calculate(predictions, y)
-
     def train(
         self,
         X: np.ndarray,
         y: np.ndarray,
         *,
+        batch_size: int | None = None,
         validation: tuple[np.ndarray, np.ndarray] = None,
         epochs: int = 100,
         print_every: int = 10,
     ):
         self.accuracy.init(y)
 
+        train_steps = 1 if not batch_size else math.ceil(len(X) / batch_size)
+
         for epoch in range(1, 1 + epochs):
-            output = self.forward(X)
+            print(f"epoch: {epoch}")
 
-            data_loss, reg_loss = self.loss.calculate(output, y)
-            loss = data_loss + reg_loss
+            self.loss.new_pass()
+            self.accuracy.new_pass()
 
-            predictions = self.output_layer.predict(output)
-            acc = self.accuracy.calculate(predictions, y)
+            for step in range(train_steps):
+                if batch_size is None:
+                    batch_x = X
+                    batch_y = y
+                else:
+                    batch_x = X[step * batch_size : (step + 1) * batch_size]
+                    batch_y = y[step * batch_size : (step + 1) * batch_size]
 
-            self.backward(output, y)
+                output = self.forward(batch_x)
 
-            self.optimizer.pre_update_params()
-            self.optimizer.update()
-            self.optimizer.post_update_params()
+                data_loss, reg_loss = self.loss.calculate(output, batch_y)
+                loss = data_loss + reg_loss
 
-            if not epoch % print_every:
-                print(
-                    f"epoch: {epoch}, "
-                    + f"acc: {acc:.3f}, "
-                    + f"loss: {loss:.3f}, "
-                    + f"data_loss: {data_loss:.3f}, "
-                    + f"reg_loss: {reg_loss:.3f}, "
-                    + f"lr: {self.optimizer.curr_lr}"
-                )
+                predictions = self.output_layer.predict(output)
+                acc = self.accuracy.calculate(predictions, batch_y)
+
+                self.backward(output, batch_y)
+
+                self.optimizer.pre_update_params()
+                self.optimizer.update()
+                self.optimizer.post_update_params()
+
+                if not step % print_every or step == train_steps - 1:
+                    print(
+                        f"step: {step}, "
+                        + f"acc: {acc:.3f}, "
+                        + f"loss: {loss:.3f}, "
+                        + f"data_loss: {data_loss:.3f}, "
+                        + f"reg_loss: {reg_loss:.3f}, "
+                        + f"lr: {self.optimizer.curr_lr}"
+                    )
+
+            epoch_data_loss, epoch_reg_loss = self.loss.calculate_accumulated()
+            epoch_loss = epoch_data_loss + epoch_reg_loss
+            epoch_acc = self.accuracy.calculate_accumulated()
+
+            print(
+                "training, "
+                + f"acc: {epoch_acc:.3f}, "
+                + f"loss: {epoch_loss:.3f}, "
+                + f"data_loss: {epoch_data_loss:.3f}, "
+                + f"reg_loss: {epoch_reg_loss:.3f}, "
+                + f"lr: {self.optimizer.curr_lr}"
+            )
 
         if validation:
-            x_val, y_val = validation
+            self.eval(*validation, batch_size=batch_size)
 
-            output = self.forward(x_val, training=False)
-            loss = self.loss.calculate(output, y_val, include_regularization=False)
+    def eval(
+        self, X_val: np.ndarray, y_val: np.ndarray, *, batch_size: int | None = None
+    ):
+        steps = 1 if not batch_size else math.ceil(len(X_val) / batch_size)
+
+        self.loss.new_pass()
+        self.accuracy.new_pass()
+
+        for step in range(steps):
+            if batch_size is None:
+                batch_x_test = X_val
+                batch_y_test = y_val
+            else:
+                batch_x_test = X_val[step * batch_size : (step + 1) * batch_size]
+                batch_y_test = y_val[step * batch_size : (step + 1) * batch_size]
+
+            output = self.forward(batch_x_test, training=False)
+            self.loss.calculate(output, batch_y_test, include_regularization=False)
             predictions = self.output_layer.predict(output)
-            accuracy = self.accuracy.calculate(predictions, y_val)
+            self.accuracy.calculate(predictions, batch_y_test)
 
-            print(f"Validation, acc: {accuracy:.3f}, loss: {loss:.3f}")
+        loss = self.loss.calculate_accumulated(include_regularization=False)
+        acc = self.accuracy.calculate_accumulated()
+
+        print(f"Validation, acc: {acc:.3f}, loss: {loss:.3f}")
+
+    def predict(self, X, *, batch_size: int | None = None):
+        output = []
+        predict_steps = 1 if not batch_size else math.ceil(len(X) / batch_size)
+
+        for step in range(predict_steps):
+            batch_x = (
+                X if not batch_size else X[step * batch_size : (step + 1) * batch_size]
+            )
+
+            output.append(self.forward(batch_x, training=False))
+
+        return np.vstack(output)
 
     def dump(self):
         if self.layers:
@@ -543,22 +658,81 @@ class Model:
         else:
             print("No layers added yet.")
 
+    def save_parameters(self, path: str):
+        with open(path, "wb+") as f:
+            pickle.dump(self.get_parameters(), f)
 
-X, y = spiral_data(1000, 3)
-x_test, y_test = spiral_data(100, 3)
+    def load_parameters(self, path: str):
+        with open(path, "rb") as f:
+            self.set_parameters(pickle.load(f))
 
-model = Model()
+    def save(self, path: str):
+        model = copy.deepcopy(self)
 
-model.add(LayerDense(2, 64, weight_regularize_l2=5e-4, bias_regularize_l2=5e-4))
-model.add(ActivationReLU())
-model.add(LayerDropout(0.1))
-model.add(LayerDense(64, 3))
-model.add(ActivationSoftMax())
+        model.loss.new_pass()
+        model.accuracy.new_pass()
 
-model.set(
-    loss=LossCategoricalCrossEntropy(),
-    optimizer=OptimizerAdam(0.05, 5e-5, 1e-7, 0.9, 0.99),
-    accuracy=AccuracyCategorical(),
-)
-model.finalize()
-model.train(X, y, validation=(x_test, y_test), epochs=10001, print_every=100)
+        layer = model.input_layer
+        while layer:
+            for prop in ["inputs", "output", "dinputs", "dweights", "dbiases"]:
+                layer.__dict__.pop(prop, None)
+            layer = layer.next
+
+        with open(path, "wb") as f:
+            pickle.dump(model, f)
+
+    @staticmethod
+    def load(path: str):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+
+def load_dataset(dataset: str, path: str):
+    labels = os.listdir(os.path.join(path, dataset))
+
+    X, y = [], []
+
+    for label in labels:
+        if label == ".DS_Store":
+            continue
+        for file in os.listdir(os.path.join(path, dataset, label)):
+            image = cv2.imread(
+                os.path.join(path, dataset, label, file), cv2.IMREAD_UNCHANGED
+            )
+            X.append(image)
+            y.append(label)
+
+    return np.array(X), np.array(y).astype("uint8")
+
+
+def create_data(path: str):
+    X_train, y_train = load_dataset("train", path)
+    X_test, y_test = load_dataset("test", path)
+
+    return (X_train, y_train, X_test, y_test)
+
+
+X, y, X_test, y_test = create_data("fashion_mnist_images")
+
+
+# Reshape and Scale the data
+X = (X.astype("float32") - 127.5) / 127.5
+X_test = (X_test.astype("float32") - 127.5) / 127.5
+
+X = X.reshape(X.shape[0], -1)
+X_test = X_test.reshape(X_test.shape[0], -1)
+
+model = Model.load("fashion_mnist.model")
+output = model.predict(X_test, batch_size=32)
+output = model.output_layer.predict(output)
+print(np.mean(output == y_test))
+
+
+# For a new image
+image_path = "some/path/to/image.png"
+
+image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+image.resize((28, 28))
+image = 255 - image
+
+image = ((image.reshape(1, -1)).astype("float32") - 127.5) / 127.5

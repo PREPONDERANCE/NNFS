@@ -518,7 +518,7 @@ class Model:
         for parameter, layer in zip(parameters, self.trainable):
             layer.set_parameters(*parameter)
 
-    def forward(self, data: np.ndarray, *, training: bool = False):
+    def forward(self, data: np.ndarray, *, training: bool = True):
         self.input_layer.forward(data)
 
         for layer in self.layers:

@@ -495,7 +495,7 @@ class Model:
             ):
                 self.softmax_loss = ActivationCategoricalLoss()
 
-    def forward(self, data: np.ndarray, *, training: bool = False):
+    def forward(self, data: np.ndarray, *, training: bool = True):
         self.input_layer.forward(data)
 
         for layer in self.layers:
