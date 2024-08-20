@@ -108,8 +108,3 @@ for t in range(epochs):
     train_loop(train_dataloader, model, loss_fn, optimizer)
     test_loop(test_dataloader, model, loss_fn)
 print("Done!")
-
-
-print(model.state_dict())
-for p in list(model.parameters()):
-    print(p.shape)
